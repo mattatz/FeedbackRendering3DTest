@@ -1,0 +1,93 @@
+﻿#pragma kernel Force
+#pragma kernel Diffuse
+
+#pragma kernel Reset
+#pragma kernel Flow
+
+#define THREAD [numthreads(8, 8, 8)]
+#define DISCARD if((int)id.x >= _Width || (int)id.y >= _Height || (int)id.z >= _Depth) return;
+
+Texture3D<float4> _VelocityRead;
+RWTexture3D<float4> _VelocityWrite;
+
+Texture3D<float4> _ColorRead;
+RWTexture3D<float4> _ColorWrite;
+
+SamplerState _PointClamp, _PointRepeat;
+
+int _Width, _Height, _Depth;
+float3 _InvSize;
+float3 _BoundsMin, _BoundsMax;
+
+float3 _Point;
+float _Radius;
+float _Decay, _Displacement;
+
+THREAD
+void Force (uint3 id : SV_DispatchThreadID)
+{
+	DISCARD
+
+	float3 uv = id.xyz * _InvSize; // (0.0 ~ 1.0)
+	float3 p = float3(
+		lerp(_BoundsMin.x, _BoundsMax.x, uv.x),
+		lerp(_BoundsMin.y, _BoundsMax.y, uv.y),
+		lerp(_BoundsMin.z, _BoundsMax.z, uv.z)
+	);
+	float3 dir = p - _Point;
+	float d = saturate(1.0 - saturate(length(dir) / _Radius));
+	float3 force = d * normalize(dir.xyz);
+	float3 vel = force + _VelocityRead[id].xyz * _Decay;
+	float m = length(vel);
+	const float epsilon = 1e-8;
+	if (m > epsilon) {
+		vel = saturate(m) * normalize(vel);
+	}
+	_VelocityWrite[id] = float4(vel, 1);
+}
+
+THREAD
+void Diffuse (uint3 id : SV_DispatchThreadID)
+{
+	DISCARD
+
+	float3 vel = float3(0, 0, 0);
+	float3 uv = id.xyz * _InvSize;
+	const float weight = 0.037; // (1 / 27);
+	for (int z = -1; z <= 1; z++) {
+		for (int y = -1; y <= 1; y++) {
+			for (int x = -1; x <= 1; x++) {
+				// vel.xyz += _VelocityRead[id + int3(x, y, z)].xyz * weight;
+
+				float3 cur = uv + float3(x, y, z) * _InvSize.xyz;
+				vel.xyz += _VelocityRead.SampleLevel(_PointRepeat, cur, 0).xyz * weight;
+
+				// float border = step(0.0, cur.x) * step(cur.x, 1.0) * step(0.0, cur.y) * step(cur.y, 1.0) * step(0.0, cur.z) * step(cur.z, 1.0);
+				// vel.xyz += border * _VelocityRead.SampleLevel(_PointRepeat, cur, 0).xyz * weight;
+			}
+		}
+	}
+
+	// _VelocityWrite[id] = _VelocityRead[id]; // non diffusion
+	_VelocityWrite[id] = float4(vel, 1);
+}
+
+THREAD
+void Reset(uint3 id : SV_DispatchThreadID)
+{
+	DISCARD
+
+	float4 color = float4((id.x & 15) / 15.0, (id.y & 15) / 15.0, (id.z & 15) / 15.0, 1.0);
+	_ColorWrite[id] = color;
+}
+
+THREAD
+void Flow (uint3 id : SV_DispatchThreadID)
+{
+	DISCARD
+
+	float3 vel = _VelocityRead[id].xyz * _Displacement;
+	float3 uv = id.xyz * _InvSize;
+    float4 to = _ColorRead.SampleLevel(_PointRepeat, uv + vel, 0);
+	_ColorWrite[id] = saturate(to);
+}
